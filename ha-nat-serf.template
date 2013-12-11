@@ -1,0 +1,337 @@
+{
+  "Description": "HA-NAT Template",
+
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Parameters" : {
+    "AccessFromCIDR" : {
+      "Description" : "CIDR address from which ssh client access",
+      "Type" : "String",
+      "Default" : "0.0.0.0/0"
+    },
+    "VpcId" : {
+      "Description" : "ID of your existing VPC",
+      "Type" : "String"
+    },
+    "VpcCIDR" : {
+      "Description" : "CIDR address of your VPC",
+      "Type" : "String"
+    },
+    "KeyName": {
+      "Description" : "Name of an existing EC2 KeyPair to enable SSH access to the instances",
+      "Type" : "String",
+      "MinLength" : "1",
+      "MaxLength" : "64",
+      "AllowedPattern" : "[-_ a-zA-Z0-9]*",
+      "ConstraintDescription": "can contain only alphanumeric characters, spaces, dashes and underscores."
+    },
+    "PublicSubnet1": {
+      "Description": "ID of your existing 1st Public Subnet",
+      "Type": "String"
+    },
+    "PublicSubnet2": {
+      "Description": "ID of your existing 2nd Public Subnet",
+      "Type": "String"
+    },
+    "ProtectedRouteTable": {
+      "Description": "ID of your existing ProtectedRouteTable",
+      "Type": "String"
+    }
+  },
+  "Mappings": {
+     "AWSNATAMI" : {
+      "us-east-1"      : { "AMI" : "ami-c6699baf" },
+      "us-west-2"      : { "AMI" : "ami-52ff7262" },
+      "us-west-1"      : { "AMI" : "ami-3bcc9e7e" },
+      "eu-west-1"      : { "AMI" : "ami-0b5b6c7f" },
+      "ap-southeast-1" : { "AMI" : "ami-02eb9350" },
+      "ap-southeast-2" : { "AMI" : "ami-ab990e91" },
+      "ap-northeast-1" : { "AMI" : "ami-5f840e5e" },
+      "sa-east-1"      : { "AMI" : "ami-0439e619" }
+    }
+  },
+  "Resources": {
+
+    "UserRole" : {
+      "Type" : "AWS::IAM::Role",
+      "Properties" : {
+        "AssumeRolePolicyDocument" : {
+          "Statement": [ {
+            "Effect": "Allow",
+              "Principal": {
+                "Service": [ "ec2.amazonaws.com" ]
+              },
+              "Action": [ "sts:AssumeRole" ]
+          } ]
+        },
+        "Path" : "/",
+        "Policies" :[ {
+          "PolicyName" : "PowerUserPolicy",
+          "PolicyDocument" : {
+            "Statement": [ {
+              "Sid": "PowerUserStmt",
+              "Effect": "Allow",
+              "NotAction": "iam:*",
+              "Resource": "*"
+            } ]
+          }
+        } ]
+      }
+    },
+    "UserProfile" : {
+      "Type" : "AWS::IAM::InstanceProfile",
+      "Properties" : {
+        "Path": "/",
+        "Roles" : [ { "Ref" : "UserRole" } ]
+      }
+    },
+
+    "NatServer1" : {
+      "Type" : "AWS::EC2::Instance",
+      "Metadata" : {
+        "Comment1" : "Configure the bootstrap helpers to install the Apache Web Server and PHP",
+        "AWS::CloudFormation::Init" : {
+          "config" : {
+            "packages" : {
+              "yum" : {
+                "jq" : []
+              }
+            },
+            "sources" : {
+              "/usr/local/bin" : "https://dl.bintray.com/mitchellh/serf/0.3.0_linux_amd64.zip"
+            },
+            "files" : {
+              "/etc/serf.conf" : {
+                "content" : { "Fn::Join" : ["", [
+                  "{\n",
+                  "  \"role\" : \"nat-\",\n",
+                  "  \"event_handlers\" : [\n",
+                  "    \"member-failed,member-leave=/opt/serf/ha-nat.sh >> /var/log/serf-event.log 2>&1\"\n",
+                  "  ]\n",
+                  "}\n"
+                ]]},
+                "owner"    : "root",
+                "group"    : "root"
+              },
+              "/opt/serf/serf-setup.sh" : {
+                "content" : { "Fn::Join" : ["", [
+                  "#/bin/bash\n",
+                  "instanceId=$(curl http://169.254.169.254/latest/meta-data/instance-id)\n",
+                  "sed -i -e \"s/nat-/nat-${instanceId}/\" /etc/serf.conf"
+                ]]},
+                "mode"  : "0755",
+                "owner" : "root",
+                "group" : "root"
+              },
+              "/opt/serf/serf-agent.sh" : {
+                "content" : { "Fn::Join" : ["", [
+                  "#/bin/bash\n",
+                    "/usr/local/bin/serf agent -config-file=/etc/serf.conf >> /var/log/serf.log 2>&1 &"
+                ]]},
+                "mode"  : "0755",
+                "owner" : "root",
+                "group" : "root"
+              },
+              "/opt/serf/serf-join.sh" : {
+                "content" : { "Fn::Join" : ["", [
+                  "#/bin/bash\n",
+                    "/usr/local/bin/serf join $1"
+                ]]},
+                "mode"  : "0755",
+                "owner" : "root",
+                "group" : "root"
+              },
+              "/opt/serf/ha-nat.sh" : {
+                "content" : { "Fn::Join" : ["", [
+                  "#!/bin/bash\n",
+                  "\n",
+                  "export AWS_DEFAULT_REGION=ap-northeast-1\n",
+                  "\n",
+                  "# role format : nat-{instanceid}\n",
+                  "while read hostname ip role\n",
+                  "do\n",
+                  "  peerinstanceid=$(echo ${role} | sed -e 's/nat-//')\n",
+                  "done\n",
+                  "myinstanceid=$(curl http://169.254.169.254/latest/meta-data/instance-id)\n",
+                  "\n",
+                  "routetableid=$(aws ec2 describe-route-tables | jq -r '.RouteTables[] | select(.Routes[].InstanceId == \"'${peerinstanceid}'\") | .RouteTableId')\n",
+                  "\n",
+                  "if [ -z \"${routetableid}\" ]; then\n",
+                  "    echo 'no failover executed'\n",
+                  "    exit 0\n",
+                  "fi\n",
+                  "\n",
+                  "aws ec2 delete-route --route-table-id ${routetableid} --destination-cidr-block 0.0.0.0/0\n",
+                  "aws ec2 create-route --route-table-id ${routetableid} --destination-cidr-block 0.0.0.0/0 --instance-id ${myinstanceid}\n"
+                ]]},
+                "mode"  : "0755",
+                "owner" : "root",
+                "group" : "root"
+              }
+            },
+            "commands" : {
+              "01_chmod_serf" : {
+                "command" : "chmod a+x /usr/local/bin/serf"
+              },
+              "02_launch_serf_on_boot" : {
+                "command" : "echo '/opt/serf/serf-agent.sh' >> /etc/rc.d/rc.local"
+              }
+            }
+          }
+        }
+      },
+      "Properties" : {
+        "InstanceType" : "t1.micro",
+        "KeyName" : { "Ref" : "KeyName" },
+        "NetworkInterfaces" : [
+          {
+            "AssociatePublicIpAddress" : "true",
+            "DeleteOnTermination" : "true",
+            "SubnetId" : { "Ref" : "PublicSubnet1" },
+            "GroupSet" : [{ "Ref" : "NatServerSecurityGroup" }],
+            "DeviceIndex" : "0"
+          }
+        ],
+        "ImageId" : { "Fn::FindInMap" : [ "AWSNATAMI", { "Ref" : "AWS::Region" }, "AMI" ]},
+        "SourceDestCheck" : "false",
+        "IamInstanceProfile" : { "Ref" : "UserProfile" },
+        "Tags" : [
+          { "Key" : "Name", "Value" : "NAT01" },
+          { "Key" : "Application", "Value" : { "Ref" : "AWS::StackId" } },
+          { "Key" : "Network", "Value" : "Public" }
+        ],
+        "UserData" : { "Fn::Base64" : { "Fn::Join" : ["", [
+          "#!/bin/bash\n",
+          "yum update -y \n",
+
+          "# Helper function\n",
+          "function error_exit\n",
+          "{\n",
+          "  /opt/aws/bin/cfn-signal -e 1 -r \"$1\" '", { "Ref" : "Nat1WaitHandle" }, "'\n",
+          "  exit 1\n",
+          "}\n",
+
+          "# Install and setup\n",
+          "/opt/aws/bin/cfn-init --verbose -s ", { "Ref" : "AWS::StackId" }, " -r NatServer1",
+          "    --region ", { "Ref" : "AWS::Region" }, " || error_exit 'Failed to run cfn-init'\n",
+          "/opt/serf/serf-setup.sh && /opt/serf/serf-agent.sh || error_exit 'Filed to run serf'\n",
+
+          "# All is well so signal success\n",
+          "/opt/aws/bin/cfn-signal -e 0 -r \"LAMP Stack setup complete\" '", { "Ref" : "Nat1WaitHandle" }, "'\n"
+        ]]}}
+      }
+    },
+
+    "NatIPAddress1" : {
+      "Type" : "AWS::EC2::EIP",
+      "Properties" : {
+        "Domain" : "vpc",
+        "InstanceId" : { "Ref" : "NatServer1" }
+      }
+    },
+    "Nat1WaitHandle" : {
+      "Type" : "AWS::CloudFormation::WaitConditionHandle",
+      "Properties" : { }
+    },
+    "Nat1WaitCondition" : {
+      "Type" : "AWS::CloudFormation::WaitCondition",
+      "Properties" : {
+        "Handle" : { "Ref" : "Nat1WaitHandle" },
+        "Timeout" : "1200"
+      }
+    },
+
+    "NatServer2" : {
+      "Type" : "AWS::EC2::Instance",
+      "DependsOn" : "Nat1WaitCondition",
+      "Properties" : {
+        "InstanceType" : "t1.micro",
+        "KeyName" : { "Ref" : "KeyName" },
+        "ImageId" : { "Fn::FindInMap" : [ "AWSNATAMI", { "Ref" : "AWS::Region" }, "AMI" ]},
+        "NetworkInterfaces" : [
+          {
+            "AssociatePublicIpAddress" : "true",
+            "DeleteOnTermination" : "true",
+            "SubnetId" : { "Ref" : "PublicSubnet2" },
+            "GroupSet" : [{ "Ref" : "NatServerSecurityGroup" }],
+            "DeviceIndex" : "0"
+          }
+        ],
+        "SourceDestCheck" : "false",
+        "IamInstanceProfile" : { "Ref" : "UserProfile" },
+        "Tags" : [
+          { "Key" : "Name", "Value" : "NAT02" },
+          { "Key" : "Application", "Value" : { "Ref" : "AWS::StackId" } },
+          { "Key" : "Network", "Value" : "Public" }
+        ],
+        "UserData" : { "Fn::Base64" : { "Fn::Join" : ["", [
+          "#!/bin/bash\n",
+          "yum update -y \n",
+
+          "# Helper function\n",
+          "function error_exit\n",
+          "{\n",
+          "  /opt/aws/bin/cfn-signal -e 1 -r \"$1\" '", { "Ref" : "Nat2WaitHandle" }, "'\n",
+          "  exit 1\n",
+          "}\n",
+
+          "# Install and setup\n",
+          "/opt/aws/bin/cfn-init --verbose -s ", { "Ref" : "AWS::StackId" }, " -r NatServer1",
+          "    --region ", { "Ref" : "AWS::Region" }, " || error_exit 'Failed to run cfn-init'\n",
+
+          "/opt/serf/serf-setup.sh && /opt/serf/serf-agent.sh && /opt/serf/serf-join.sh ", { "Fn::GetAtt" : [ "NatServer1", "PrivateIp"] }, " || error_exit 'Filed to run serf'\n",
+          "# All is well so signal success\n",
+          "/opt/aws/bin/cfn-signal -e 0 -r \"LAMP Stack setup complete\" '", { "Ref" : "Nat2WaitHandle" }, "'\n"
+        ]]}}
+      }
+    },
+
+    "NatServerSecurityGroup" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "GroupDescription" : "Enable NAT access to hosts in Private subnet",
+        "VpcId" : { "Ref" : "VpcId" },
+        "SecurityGroupIngress" : [
+          { "IpProtocol" : "tcp",  "FromPort" : "22",   "ToPort" : "22",    "CidrIp" : { "Ref" : "AccessFromCIDR"} },
+          { "IpProtocol" : "icmp", "FromPort" : "-1",   "ToPort" : "-1",    "CidrIp" : { "Ref" : "VpcCIDR" } },
+          { "IpProtocol" : "tcp",  "FromPort" : "80",   "ToPort" : "80",    "CidrIp" : { "Ref" : "VpcCIDR" } },
+          { "IpProtocol" : "tcp",  "FromPort" : "443",  "ToPort" : "443",   "CidrIp" : { "Ref" : "VpcCIDR" } },
+          { "IpProtocol" : "tcp",  "FromPort" : "7946",  "ToPort" : "7946", "CidrIp" : { "Ref" : "VpcCIDR" } },
+          { "IpProtocol" : "udp",  "FromPort" : "7946",  "ToPort" : "7946", "CidrIp" : { "Ref" : "VpcCIDR" } },
+          { "IpProtocol" : "tcp",  "FromPort" : "123",   "ToPort" : "123",  "CidrIp" : "0.0.0.0/0" },
+          { "IpProtocol" : "udp",  "FromPort" : "123",   "ToPort" : "123",  "CidrIp" : "0.0.0.0/0" }
+        ]
+      }
+    },
+
+    "NatIPAddress2" : {
+      "Type" : "AWS::EC2::EIP",
+      "Properties" : {
+        "Domain" : "vpc",
+        "InstanceId" : { "Ref" : "NatServer2" }
+      }
+    },
+
+    "Nat2WaitHandle" : {
+      "Type" : "AWS::CloudFormation::WaitConditionHandle",
+      "Properties" : { }
+    },
+    "Nat2WaitCondition" : {
+      "Type" : "AWS::CloudFormation::WaitCondition",
+      "DependsOn" : "Nat1WaitCondition",
+      "Properties" : {
+        "Handle" : { "Ref" : "Nat2WaitHandle" },
+        "Timeout" : "1200"
+      }
+    },
+    "ProtectedRoute" : {
+      "Type" : "AWS::EC2::Route",
+      "DependsOn" : "Nat2WaitCondition",
+      "Properties" : {
+        "RouteTableId" : { "Ref" : "ProtectedRouteTable" },
+        "DestinationCidrBlock" : "0.0.0.0/0",
+        "InstanceId" : { "Ref" : "NatServer1" }
+      }
+    }
+
+  }
+}
