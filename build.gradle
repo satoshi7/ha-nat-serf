@@ -1,0 +1,62 @@
+buildscript {
+  repositories {
+    mavenCentral()
+    maven { url 'http://public-maven.classmethod.info/release' }
+  }
+  dependencies {
+    classpath 'jp.classmethod.aws:gradle-aws-plugin:0.1'
+  }
+}
+
+ext {
+  artifactId = 'ha-nat-serf'
+  templateBucket = 'cm-public-cfn-templates'
+}
+
+version = '1.0-SNAPSHOT'
+
+apply plugin: 'aws'
+aws {
+  assert project.hasProperty('awsAccessKey') && project.hasProperty('awsSecretKey'): "AWS credential is required"
+  accessKeyId awsAccessKey
+  secretKey awsSecretKey
+  region 'ap-northeast-1'
+}
+
+// ======== release tasks ========
+
+task deployTemplate(type: jp.classmethod.aws.gradle.s3.AmazonS3FileUploadTask) {
+  bucketName project.templateBucket
+  key "${project.artifactId}/${project.artifactId}-${version}.template"
+  file file("${project.artifactId}.template")
+  overwrite project.version.endsWith('-SNAPSHOT')
+}
+
+task deployDemoTemplate(type: jp.classmethod.aws.gradle.s3.AmazonS3FileUploadTask) {
+  bucketName project.templateBucket
+  key "${project.artifactId}/${project.artifactId}-demo-${version}.template"
+  file file("${project.artifactId}-demo.template")
+  overwrite project.version.endsWith('-SNAPSHOT')
+}
+
+task deploy(dependsOn: [deployTemplate, deployDemoTemplate])
+
+// ======== demo tasks ========
+
+apply plugin: 'aws-cloudformation'
+cloudFormation {
+  stackName "${project.artifactId}-demo"
+  templateURL "https://${project.templateBucket}.s3.amazonaws.com/${project.artifactId}/${project.artifactId}-demo-${project.version}.template"
+}
+
+task cfnInit << {
+  assert project.hasProperty('keyName'): "keyName parameter is required"
+  cloudFormation.stackParams([KeyName: project.keyName])
+}
+
+task deployDemo(dependsOn: [awsCfnMigrateStackAndWaitCompleted, cfnInit]) << {
+  def stack = cloudFormation.getStack("${project.artifactId}-demo")
+  stack.outputs.each { println "${it.outputKey} = ${it.outputValue}" }
+}
+
+task undeployDemo(dependsOn: [awsCfnDeleteStackAndWaitCompleted, cfnInit])
