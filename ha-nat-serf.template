@@ -103,10 +103,10 @@
               "/etc/serf.conf" : {
                 "content" : { "Fn::Join" : ["", [
                   "{\n",
-                    "\"role\" : \"nat-\",\n",
-                    "\"event_handlers\" : [\n",
-                      "\"member-failed,member-leave=/opt/serf/ha-nat.sh >> /var/log/serf-event.log 2>&1\"\n",
-                    "]\n",
+                  "  \"role\" : \"nat-\",\n",
+                  "  \"event_handlers\" : [\n",
+                  "    \"member-failed,member-leave=/opt/serf/ha-nat.sh >> /var/log/serf-event.log 2>&1\"\n",
+                  "  ]\n",
                   "}\n"
                 ]]},
                 "owner"    : "root",
