@@ -303,7 +303,7 @@
       "Type" : "AWS::CloudFormation::Stack",
       "DependsOn" : "PublicRoute",
       "Properties" : {
-        "TemplateURL" : "https://cm-public-cfn-templates.s3.amazonaws.com/ha-nat-serf/ha-nat-serf-1.0-SNAPSHOT.template",
+        "TemplateURL" : "https://cm-public-cfn-templates.s3.amazonaws.com/ha-nat-serf/ha-nat-serf-1.0.template",
          "Parameters" : {
            "AccessFromCIDR"      : { "Ref" : "AccessFromCIDR" },
            "VpcId"               : { "Ref" : "VPC" },
